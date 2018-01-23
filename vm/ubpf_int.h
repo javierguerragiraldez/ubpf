@@ -21,6 +21,7 @@
 #include "ebpf.h"
 
 #define MAX_INSTS 65536
+#define MAX_EXT_FUNCS 64
 #define STACK_SIZE 128
 
 struct ebpf_inst;
