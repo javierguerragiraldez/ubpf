@@ -3,26 +3,18 @@
 #include <stdbool.h>
 #include "ubpf_int.h"
 
-bool ubpf_check(const struct ubpf_vm *vm, const void *code, uint32_t code_len, char **errmsg)
+enum reachtype {
+	kUnseen = 0,
+	kFollowthrough = 0x01,
+	kCondBranch = 0x02,
+	kJump = 0x03,
+};
+
+
+static bool linear_checks(const struct ubpf_vm *vm, const struct ebpf_inst *insts, uint32_t num_insts, char **errmsg)
 {
-	if (code_len % 8 != 0) {
-		*errmsg = ubpf_error("Non integer number of instructions: %d\n", code_len);
-		return false;
-	}
-
-	uint32_t num_insts = code_len / 8;
-
-	if (num_insts >= MAX_INSTS) {
-		*errmsg = ubpf_error("too many instructions (max %u)", MAX_INSTS);
-		return false;
-	}
-
-	const struct ebpf_inst *insts = code;
-
-	if (num_insts == 0 || insts[num_insts-1].opcode != EBPF_OP_EXIT) {
-		*errmsg = ubpf_error("no exit at end of instructions");
-		return false;
-	}
+	enum reachtype reaches[num_insts+1];
+	reaches[0] = kFollowthrough;
 
 	int i;
 	for (i = 0; i < num_insts; i++) {
@@ -53,6 +45,7 @@ bool ubpf_check(const struct ubpf_vm *vm, const void *code, uint32_t code_len, c
 		case EBPF_OP_MOV_REG:
 		case EBPF_OP_ARSH_IMM:
 		case EBPF_OP_ARSH_REG:
+			reaches[i+1] |= kFollowthrough;
 			break;
 
 		case EBPF_OP_LE:
@@ -61,6 +54,7 @@ bool ubpf_check(const struct ubpf_vm *vm, const void *code, uint32_t code_len, c
 				*errmsg = ubpf_error("invalid endian immediate at PC %d", i);
 				return false;
 			}
+			reaches[i+1] |= kFollowthrough;
 			break;
 
 		case EBPF_OP_ADD64_IMM:
@@ -86,12 +80,14 @@ bool ubpf_check(const struct ubpf_vm *vm, const void *code, uint32_t code_len, c
 		case EBPF_OP_MOV64_REG:
 		case EBPF_OP_ARSH64_IMM:
 		case EBPF_OP_ARSH64_REG:
+			reaches[i+1] |= kFollowthrough;
 			break;
 
 		case EBPF_OP_LDXW:
 		case EBPF_OP_LDXH:
 		case EBPF_OP_LDXB:
 		case EBPF_OP_LDXDW:
+			reaches[i+1] |= kFollowthrough;
 			break;
 
 		case EBPF_OP_STW:
@@ -102,6 +98,7 @@ bool ubpf_check(const struct ubpf_vm *vm, const void *code, uint32_t code_len, c
 		case EBPF_OP_STXH:
 		case EBPF_OP_STXB:
 		case EBPF_OP_STXDW:
+			reaches[i+1] |= kFollowthrough;
 			store = true;
 			break;
 
@@ -110,7 +107,9 @@ bool ubpf_check(const struct ubpf_vm *vm, const void *code, uint32_t code_len, c
 				*errmsg = ubpf_error("incomplete lddw at PC %d", i);
 				return false;
 			}
+			reaches[i+1] |= kFollowthrough;
 			i++; /* Skip next instruction */
+			reaches[i+1] |= kFollowthrough;
 			break;
 
 		case EBPF_OP_JA:
@@ -148,6 +147,12 @@ bool ubpf_check(const struct ubpf_vm *vm, const void *code, uint32_t code_len, c
 				*errmsg = ubpf_error("jump to middle of lddw at PC %d", i);
 				return false;
 			}
+			if (inst.opcode == EBPF_OP_JA) {
+				reaches[new_pc] |= kJump;
+			} else {
+				reaches[new_pc] |= kCondBranch;
+				reaches[i+1] |= kFollowthrough;
+			}
 			break;
 
 		case EBPF_OP_CALL:
@@ -159,6 +164,7 @@ bool ubpf_check(const struct ubpf_vm *vm, const void *code, uint32_t code_len, c
 				*errmsg = ubpf_error("call to nonexistent function %u at PC %d", inst.imm, i);
 				return false;
 			}
+			reaches[i+1] |= kFollowthrough;
 			break;
 
 		case EBPF_OP_EXIT:
@@ -172,6 +178,7 @@ bool ubpf_check(const struct ubpf_vm *vm, const void *code, uint32_t code_len, c
 				*errmsg = ubpf_error("division by zero at PC %d", i);
 				return false;
 			}
+			reaches[i+1] |= kFollowthrough;
 			break;
 
 		default:
@@ -188,6 +195,41 @@ bool ubpf_check(const struct ubpf_vm *vm, const void *code, uint32_t code_len, c
 			*errmsg = ubpf_error("invalid destination register at PC %d", i);
 			return false;
 		}
+	}
+
+	for (i = 0; i < num_insts; i++) {
+		if (reaches[i] == kUnseen) {
+			*errmsg = ubpf_error("dead code at PC %d", i);
+			return false;
+		}
+	}
+
+	return true;
+}
+
+bool ubpf_check(const struct ubpf_vm *vm, const void *code, uint32_t code_len, char **errmsg)
+{
+	if (code_len % 8 != 0) {
+		*errmsg = ubpf_error("Non integer number of instructions: %d\n", code_len);
+		return false;
+	}
+
+	uint32_t num_insts = code_len / 8;
+
+	if (num_insts >= MAX_INSTS) {
+		*errmsg = ubpf_error("too many instructions (max %u)", MAX_INSTS);
+		return false;
+	}
+
+	const struct ebpf_inst *insts = code;
+
+	if (num_insts == 0 || insts[num_insts-1].opcode != EBPF_OP_EXIT) {
+		*errmsg = ubpf_error("no exit at end of instructions");
+		return false;
+	}
+
+	if (! linear_checks(vm, insts, num_insts, errmsg)) {
+		return false;
 	}
 
 	return true;

@@ -1,0 +1,7 @@
+-- asm
+mov32 r0, 2
+ja +1
+mov32 r0, 3
+exit
+-- error
+Failed to load code: dead code at PC 2
