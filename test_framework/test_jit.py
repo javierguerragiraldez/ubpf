@@ -47,6 +47,9 @@ def check_datafile(filename):
                 cmd.extend(['-m', memfile.name])
             cmd.extend(['-j', '-r', str(register_offset), '-'])
 
+            if 'verify' in data:
+                cmd.extend(['-v', ''.join(w.strip()[:1] for w in data['verify'].split(','))])
+
             vm = Popen(cmd, stdin=PIPE, stdout=PIPE, stderr=PIPE)
 
             stdout, stderr = vm.communicate(code)

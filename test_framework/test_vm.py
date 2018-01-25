@@ -35,6 +35,9 @@ def check_datafile(filename):
         memfile.flush()
         cmd.extend(['-m', memfile.name])
 
+    if 'verify' in data:
+        cmd.extend(['-v', ''.join(w.strip()[:1] for w in data['verify'].split(','))])
+
     cmd.append('-')
 
     vm = Popen(cmd, stdin=PIPE, stdout=PIPE, stderr=PIPE)

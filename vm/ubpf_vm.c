@@ -46,6 +46,10 @@ ubpf_create(void)
         return NULL;
     }
 
+    vm->check_flags.basic = true;
+	vm->check_flags.dead_code = false;
+	vm->check_flags.all_paths = false;
+
     return vm;
 }
 

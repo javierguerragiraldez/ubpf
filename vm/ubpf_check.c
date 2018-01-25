@@ -1,7 +1,9 @@
 
 
 #include <stdbool.h>
+#include <string.h>
 #include "ubpf_int.h"
+
 
 enum reachtype {
 	kUnseen = 0,
@@ -11,7 +13,27 @@ enum reachtype {
 };
 
 
-#define BPF_CLASS(opcode)	((opcode) & EBPF_CLS_MASK)
+#define EBPF_CLASS(opcode)	((opcode) & EBPF_CLS_MASK)
+#define EBPF_SUB_OP(opcode)	((opcode) & EBPF_ALU_OP_MASK)
+
+
+void ubpf_set_checking(struct ubpf_vm *vm, const char *options)
+{
+	while (options && *options) {
+		switch (*options) {
+			case 'b':
+				vm->check_flags.basic = true;
+				break;
+			case 'd':
+				vm->check_flags.dead_code = true;
+				break;
+			case 'p':
+				vm->check_flags.all_paths = true;
+				break;
+		}
+		options++;
+	}
+}
 
 
 static bool linear_checks(const struct ubpf_vm *vm, const struct ebpf_inst *insts, uint32_t num_insts, char **errmsg)
@@ -24,7 +46,7 @@ static bool linear_checks(const struct ubpf_vm *vm, const struct ebpf_inst *inst
 		struct ebpf_inst inst = insts[i];
 		bool store = false;
 
-		switch (BPF_CLASS(inst.opcode)) {
+		switch (EBPF_CLASS(inst.opcode)) {
 			case EBPF_CLS_ALU:
 			case EBPF_CLS_ALU64:
 				switch (inst.opcode) {
@@ -127,10 +149,259 @@ static bool linear_checks(const struct ubpf_vm *vm, const struct ebpf_inst *inst
 		}
 	}
 
-	for (i = 0; i < num_insts; i++) {
-		if (reaches[i] == kUnseen) {
-			*errmsg = ubpf_error("dead code at PC %d", i);
-			return false;
+	if (vm->check_flags.dead_code) {
+		for (i = 0; i < num_insts; i++) {
+			if (reaches[i] == kUnseen) {
+				*errmsg = ubpf_error("dead code at PC %d", i);
+				return false;
+			}
+		}
+	}
+
+	return true;
+}
+
+
+enum reg_type {
+	kUnset,				// Has not been set.
+	kScalar,			// an integer value
+	kObjectPtr,			// Pointer to or within an object.
+	kObjectPtrOrNull,	// Pointer to an object or NULL.
+};
+
+struct range {
+	uint64_t lo, hi;
+};
+
+struct reg_status {
+	enum reg_type type;
+	struct range range;
+	int object_type;		// index on registered types array
+};
+#define reg_stat(_t, _lo, _hi, _ot)	((struct reg_status){	\
+	.type=(_t), .range.lo=(_lo), .range.hi=(_hi), .object_type=(_ot)})
+
+struct full_state {
+	int pc;
+	struct reg_status reg[10];
+};
+
+const int kScanStackSize = 1024;
+
+#define stack_top()			(stack[stackP])
+#define stack_pc()			(stack_top().pc)
+#define stack_reg(_r)		(stack_top().reg[(_r)])
+#define stack_wipe_top()	do { memset(&stack_top(), 0, sizeof(struct full_state));} while(0)
+#define stack_set_pc(_pc)	do {stack_top().pc = (_pc);} while (0)
+#define stack_set_reg(_r, _t, _lo, _hi, _ot)			\
+do {			\
+	stack_reg(_r) = (struct reg_status) {	\
+		.type = (_t),		\
+		.range = {.lo=(_lo), .hi=(_hi)},	\
+		.object_type = (_ot),		\
+	};		\
+} while (0)
+
+
+struct object_type {
+	size_t size;
+};
+
+// TODO: set this as a vm field
+static struct object_type deftypes[] = {
+	{.size = 10},
+};
+static int numdeftypes = (sizeof(deftypes) / sizeof(deftypes[0]));
+
+static bool op_reg_src(uint8_t opcode) {
+	bool reg_src = (opcode & EBPF_SRC_REG) != 0;
+	// TODO: check specific opcodes
+	return reg_src;
+}
+
+static bool op_imm_src(uint8_t opcode) {
+	bool imm_src = (opcode & EBPF_SRC_REG) == 0;
+	// TODO: check specific opcodes
+	return imm_src;
+}
+
+static inline bool range_eq(struct range a, struct range b)
+{
+	return a.lo == b.lo && a.hi == b.hi;
+}
+
+static inline bool range_intersect(struct range a, struct range b)
+{
+	return a.lo <= b.hi && a.hi >= b.lo;
+}
+
+static bool verify_helper_requirements(
+	const struct ubpf_vm *vm,
+	int helper,
+	const struct full_state *state,
+	char **errmsg)
+{
+	return true;
+}
+
+static void set_helper_results(
+	const struct ubpf_vm *vm,
+	int helper,
+	struct full_state *state)
+{
+	struct reg_status unsetreg = reg_stat(kUnset, 0, 0, 0);
+	for (int r = 1; r <= 5; r++) {
+		state->reg[r] = unsetreg;
+	}
+}
+
+
+static bool codepaths_scan (const struct ubpf_vm *vm, const struct ebpf_inst *insts, uint32_t num_insts, char **errmsg)
+{
+	struct full_state stack[kScanStackSize];
+	int stackP = 0;
+
+	stack_wipe_top();
+	stack_set_pc(0);
+	stack_reg(1) = reg_stat(kObjectPtr, 0, 0, 0);
+	if (numdeftypes <= 0) {
+		*errmsg = ubpf_error("Undefined object type %d.", 0);
+		return false;
+	}
+
+	while (stackP >= 0) {
+		const struct ebpf_inst inst = insts[stack_pc()];
+
+		struct reg_status src_datastatus = reg_stat(kUnset, 0, 0, 0);
+		if (op_reg_src(inst.opcode)) {
+			src_datastatus = stack_reg(inst.src);
+		} else if (op_imm_src(inst.opcode)) {
+			src_datastatus = reg_stat(kScalar, inst.imm, inst.imm, 0);
+		}
+
+		switch (EBPF_CLASS(inst.opcode)) {
+			case EBPF_CLS_LD:
+			case EBPF_CLS_LDX:
+				// TODO: check source
+				stack_reg(inst.dst) = reg_stat(kScalar, 0, ~0, 0);
+				stack_pc()++;
+				break;
+
+			case EBPF_CLS_ST:
+			case EBPF_CLS_STX:
+				stack_pc()++;
+				break;
+
+			case EBPF_CLS_ALU:
+			case EBPF_CLS_ALU64:
+				// WRONG: assuming dst <= src
+				stack_reg(inst.dst) = src_datastatus;
+				stack_pc()++;
+				break;
+
+			case EBPF_CLS_JMP: {
+				int new_pc = stack_pc() + 1 + inst.offset;
+				bool can_jump = true;
+				bool can_not_jump = inst.opcode != EBPF_OP_JA;
+
+				switch (inst.opcode) {
+					case EBPF_OP_JA:
+						can_jump = true;
+						can_not_jump = false;
+						break;
+
+					case EBPF_OP_CALL:
+						can_jump = false;
+						can_not_jump = true;
+						if (!verify_helper_requirements(vm, inst.imm, &stack_top(), errmsg)) {
+							return false;
+						}
+						set_helper_results(vm, inst.imm, &stack_top());
+						break;
+
+					case EBPF_OP_EXIT:
+						can_jump = false;
+						can_not_jump = false;
+						break;
+
+					default: {
+						struct reg_status dst_datastatus = stack_reg(inst.dst);
+						if (src_datastatus.type == kUnset || dst_datastatus.type == kUnset) {
+							*errmsg = ubpf_error("testing unset data at PC %d. (%d/%d)",
+												 stack_pc(), src_datastatus.type, dst_datastatus.type);
+							return false;
+						}
+						switch (EBPF_SUB_OP(inst.opcode)) {
+							case EBPF_SUB_OP(EBPF_OP_JEQ_REG):
+								if (src_datastatus.type == kScalar && dst_datastatus.type == kScalar) {
+									can_jump = range_intersect(src_datastatus.range, dst_datastatus.range);
+									can_not_jump = !range_eq(src_datastatus.range, dst_datastatus.range);
+								}
+								break;
+
+							case EBPF_SUB_OP(EBPF_OP_JNE_REG):
+								if (src_datastatus.type == kScalar && dst_datastatus.type == kScalar) {
+									can_jump = !range_eq(src_datastatus.range, dst_datastatus.range);
+									can_not_jump = range_intersect(src_datastatus.range, dst_datastatus.range);
+								}
+								break;
+
+							case EBPF_SUB_OP(EBPF_OP_JGT_REG):
+								if (src_datastatus.type == kScalar && dst_datastatus.type == kScalar) {
+									can_jump = dst_datastatus.range.hi > src_datastatus.range.lo;
+									can_not_jump = dst_datastatus.range.lo <= src_datastatus.range.hi;
+								}
+								break;
+
+							case EBPF_SUB_OP(EBPF_OP_JGE_REG):
+								if (src_datastatus.type == kScalar && dst_datastatus.type == kScalar) {
+									can_jump = dst_datastatus.range.hi >= src_datastatus.range.lo;
+									can_not_jump = dst_datastatus.range.lo < src_datastatus.range.hi;
+								}
+								break;
+
+							case EBPF_SUB_OP(EBPF_OP_JLT_REG):
+								if (src_datastatus.type == kScalar && dst_datastatus.type == kScalar) {
+									can_jump = dst_datastatus.range.lo < src_datastatus.range.hi;
+									can_not_jump = dst_datastatus.range.hi >= src_datastatus.range.lo;
+								}
+								break;
+
+							case EBPF_SUB_OP(EBPF_OP_JLE_REG):
+								if (src_datastatus.type == kScalar && dst_datastatus.type == kScalar) {
+									can_jump = dst_datastatus.range.lo <= src_datastatus.range.hi;
+									can_not_jump = dst_datastatus.range.hi > src_datastatus.range.lo;
+								}
+								break;
+
+							case EBPF_SUB_OP(EBPF_OP_JSGT_REG):		// TODO
+							case EBPF_SUB_OP(EBPF_OP_JSGE_REG):		// TODO
+							case EBPF_SUB_OP(EBPF_OP_JSLT_REG):		// TODO
+							case EBPF_SUB_OP(EBPF_OP_JSLE_REG):		// TODO
+
+							case EBPF_SUB_OP(EBPF_OP_JSET_REG):		// TODO
+								break;
+						}
+						break;
+					}
+				}
+				if (can_not_jump) {
+					stack_pc()++;
+					// TODO: register non-jump constraints
+					if (can_jump) {
+						// TODO add branch
+					}
+				} else {
+					if (can_jump) {
+						stack_pc() = new_pc;
+						// TODO: register jump constraints
+					} else {
+						// path end
+						stackP--;
+					}
+				}
+				break;
+			}
 		}
 	}
 
@@ -158,8 +429,16 @@ bool ubpf_check(const struct ubpf_vm *vm, const void *code, uint32_t code_len, c
 		return false;
 	}
 
-	if (! linear_checks(vm, insts, num_insts, errmsg)) {
-		return false;
+	if (vm->check_flags.basic) {
+		if (! linear_checks(vm, insts, num_insts, errmsg)) {
+			return false;
+		}
+	}
+
+	if (vm->check_flags.all_paths) {
+		if (! codepaths_scan(vm, insts, num_insts, errmsg)) {
+			return false;
+		}
 	}
 
 	return true;

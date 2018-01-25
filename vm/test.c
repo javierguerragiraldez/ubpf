@@ -49,14 +49,15 @@ int main(int argc, char **argv)
         { .name = "mem", .val = 'm', .has_arg=1 },
         { .name = "jit", .val = 'j' },
         { .name = "register-offset", .val = 'r', .has_arg=1 },
+        { .name = "verify", .val = 'v', .has_arg=1 },
         { }
     };
 
-    const char *mem_filename = NULL;
+    const char *mem_filename = NULL, *verify_options = NULL;
     bool jit = false;
 
     int opt;
-    while ((opt = getopt_long(argc, argv, "hm:jr:", longopts, NULL)) != -1) {
+    while ((opt = getopt_long(argc, argv, "hm:jr:v:", longopts, NULL)) != -1) {
         switch (opt) {
         case 'm':
             mem_filename = optarg;
@@ -66,6 +67,9 @@ int main(int argc, char **argv)
             break;
         case 'r':
             ubpf_set_register_offset(atoi(optarg));
+            break;
+        case 'v':
+            verify_options = optarg;
             break;
         case 'h':
             usage(argv[0]);
@@ -103,9 +107,13 @@ int main(int argc, char **argv)
         return 1;
     }
 
+    if (verify_options) {
+        ubpf_set_checking(vm, verify_options);
+    }
+
     register_functions(vm);
 
-    /* 
+    /*
      * The ELF magic corresponds to an RSH instruction with an offset,
      * which is invalid.
      */
