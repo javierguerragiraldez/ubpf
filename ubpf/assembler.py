@@ -123,3 +123,7 @@ def assemble(source):
     for inst in insts:
         output.write(assemble_one(inst))
     return output.getvalue()
+
+if __name__ == "__main__":
+    import sys
+    sys.stdout.write(assemble(sys.stdin.read()))
