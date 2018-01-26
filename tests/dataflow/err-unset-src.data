@@ -1,0 +1,7 @@
+-- asm
+mov r0, r2
+exit
+-- verify
+basic, loops, dead, paths
+-- error
+Failed to load code: Operating on unset register at PC 0

@@ -1,0 +1,7 @@
+-- asm
+jne r0, r1, +0
+exit
+-- verify
+basic, loops, dead, paths
+-- error
+Failed to load code: testing unset data at PC 0

@@ -286,24 +286,27 @@ static bool codepaths_scan (const struct ubpf_vm *vm, const struct ebpf_inst *in
 			src_datastatus = reg_stat(kScalar, inst.imm, inst.imm, 0);
 		}
 
+		int nextpc = stack_pc() + 1;
+
 		switch (EBPF_CLASS(inst.opcode)) {
 			case EBPF_CLS_LD:
 			case EBPF_CLS_LDX:
 				// TODO: check source
 				stack_reg(inst.dst) = reg_stat(kScalar, 0, ~0, 0);
-				stack_pc()++;
 				break;
 
 			case EBPF_CLS_ST:
 			case EBPF_CLS_STX:
-				stack_pc()++;
 				break;
 
 			case EBPF_CLS_ALU:
 			case EBPF_CLS_ALU64:
+				if (src_datastatus.type == kUnset) {
+					*errmsg = ubpf_error("Operating on unset register at PC %d", stack_pc());
+					return false;
+				}
 				// FIXME: assuming dst <= src (wrong)
 				stack_reg(inst.dst) = src_datastatus;
-				stack_pc()++;
 				break;
 
 			case EBPF_CLS_JMP: {
@@ -334,8 +337,7 @@ static bool codepaths_scan (const struct ubpf_vm *vm, const struct ebpf_inst *in
 					default: {
 						struct reg_status dst_datastatus = stack_reg(inst.dst);
 						if (src_datastatus.type == kUnset || dst_datastatus.type == kUnset) {
-							*errmsg = ubpf_error("testing unset data at PC %d. (%d/%d)",
-												 stack_pc(), src_datastatus.type, dst_datastatus.type);
+							*errmsg = ubpf_error("testing unset data at PC %d", stack_pc());
 							return false;
 						}
 						switch (EBPF_SUB_OP(inst.opcode)) {
@@ -393,14 +395,13 @@ static bool codepaths_scan (const struct ubpf_vm *vm, const struct ebpf_inst *in
 					}
 				}
 				if (can_not_jump) {
-					stack_pc()++;
 					// TODO: register non-jump constraints
 					if (can_jump) {
-						// TODO add branch
+						// TODO add branch on new_pc
 					}
 				} else {
 					if (can_jump) {
-						stack_pc() = new_pc;
+						nextpc = new_pc;
 						// TODO: register jump constraints
 					} else {
 						// path end
@@ -410,6 +411,7 @@ static bool codepaths_scan (const struct ubpf_vm *vm, const struct ebpf_inst *in
 				break;
 			}
 		}
+		stack_pc() = nextpc;
 	}
 
 	return true;
