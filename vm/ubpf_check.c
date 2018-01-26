@@ -12,10 +12,11 @@ enum reachtype {
 	kJump = 0x03,
 };
 
+#define _unused_(x)	((void)(x))
 
 #define EBPF_CLASS(opcode)	((opcode) & EBPF_CLS_MASK)
 #define EBPF_SUB_OP(opcode)	((opcode) & EBPF_ALU_OP_MASK)
-
+#define EBPF_OPSIZE(opcode)	((opcode) & 0x18)
 
 void ubpf_set_checking(struct ubpf_vm *vm, const char *options)
 {
@@ -172,6 +173,7 @@ static bool linear_checks(const struct ubpf_vm *vm, const struct ebpf_inst *inst
 enum reg_type {
 	kUnset,				// Has not been set.
 	kScalar,			// an integer value
+	kStackPtr,			// Pointer within the stack
 	kObjectPtr,			// Pointer to or within an object.
 	kObjectPtrOrNull,	// Pointer to an object or NULL.
 };
@@ -182,15 +184,15 @@ struct range {
 
 struct reg_status {
 	enum reg_type type;
-	struct range range;
 	int object_type;		// index on registered types array
+	struct range range;
 };
 #define reg_stat(_t, _lo, _hi, _ot)	((struct reg_status){	\
 	.type=(_t), .range.lo=(_lo), .range.hi=(_hi), .object_type=(_ot)})
 
 struct full_state {
 	int pc;
-	struct reg_status reg[10];
+	struct reg_status reg[11];
 };
 
 const int kScanStackSize = 1024;
@@ -214,22 +216,60 @@ struct object_type {
 	size_t size;
 };
 
-// TODO: set this as a vm field
-static struct object_type deftypes[] = {
-	{.size = 10},
+// TODO: set these as a vm field
+enum {
+	kStackSize = 1024,
 };
-static int numdeftypes = (sizeof(deftypes) / sizeof(deftypes[0]));
+
+static struct object_type deftypes[] = {
+	{.size = 10},		// context
+	{.size = kStackSize},	// stack
+};
+static const int numdeftypes = (sizeof(deftypes) / sizeof(deftypes[0]));
+
 
 static bool op_reg_src(uint8_t opcode) {
-	bool reg_src = (opcode & EBPF_SRC_REG) != 0;
-	// TODO: check specific opcodes
-	return reg_src;
+	switch(EBPF_CLASS(opcode)) {
+		case EBPF_CLS_LDX:
+			return true;
+
+		case EBPF_CLS_ALU:
+		case EBPF_CLS_ALU64:
+		case EBPF_CLS_JMP:
+			return (opcode & EBPF_SRC_REG) != 0;
+	}
+	return false;
 }
 
 static bool op_imm_src(uint8_t opcode) {
-	bool imm_src = (opcode & EBPF_SRC_REG) == 0;
-	// TODO: check specific opcodes
-	return imm_src;
+	switch(EBPF_CLASS(opcode)) {
+		case EBPF_CLS_ALU:
+		case EBPF_CLS_ALU64:
+		case EBPF_CLS_JMP:
+			return (opcode & EBPF_SRC_REG) == 0;
+	}
+	return false;
+}
+
+static int wordsize(uint8_t opsize)
+{
+	switch (opsize) {
+		case EBPF_SIZE_W:
+			return 4;
+		case EBPF_SIZE_H:
+			return 2;
+		case EBPF_SIZE_B:
+			return 1;
+		case EBPF_SIZE_DW:
+			return 8;
+		default:
+			return ~0;
+	}
+}
+
+static inline bool within_range(struct range a, struct range b)
+{
+	return a.lo >= b.lo && a.hi <= b.hi;
 }
 
 static inline bool range_eq(struct range a, struct range b)
@@ -242,12 +282,48 @@ static inline bool range_intersect(struct range a, struct range b)
 	return a.lo <= b.hi && a.hi >= b.lo;
 }
 
+static bool check_mem_read(
+	const struct ubpf_vm *vm,
+	const struct reg_status *src_stat,
+	int16_t offset, uint8_t opsize
+) {
+	_unused_(vm);
+
+	struct range valid = {0, 0};
+
+	switch(src_stat->type) {
+		case kStackPtr:
+			valid.lo = -kStackSize;
+			valid.hi = -wordsize(opsize);
+			break;
+
+		case kObjectPtr:
+			if (src_stat->object_type >= numdeftypes) {
+				return false;
+			}
+			valid.hi = deftypes[src_stat->object_type].size - wordsize(opsize);
+			break;
+
+		default:
+			return false;
+	}
+	valid.lo -= offset;
+	valid.hi -= offset;
+	return within_range(src_stat->range, valid);
+}
+
+
+
 static bool verify_helper_requirements(
 	const struct ubpf_vm *vm,
 	int helper,
 	const struct full_state *state,
 	char **errmsg)
 {
+	_unused_(vm);
+	_unused_(helper);
+	_unused_(state);
+	_unused_(errmsg);
 	return true;
 }
 
@@ -256,6 +332,8 @@ static void set_helper_results(
 	int helper,
 	struct full_state *state)
 {
+	_unused_(vm);
+	_unused_(helper);
 	struct reg_status unsetreg = reg_stat(kUnset, 0, 0, 0);
 	for (int r = 1; r <= 5; r++) {
 		state->reg[r] = unsetreg;
@@ -270,8 +348,9 @@ static bool codepaths_scan (const struct ubpf_vm *vm, const struct ebpf_inst *in
 
 	stack_wipe_top();
 	stack_set_pc(0);
-	stack_reg(1) = reg_stat(kObjectPtr, 0, 0, 0);
-	if (numdeftypes <= 0) {
+	stack_reg(1) = reg_stat(kObjectPtr, 0, 0, 0);	// R1: context pointer
+	stack_reg(10) = reg_stat(kObjectPtr, 0, 0, 1);	// R10: stack frame pointer (TODO: make it RO)
+	if (numdeftypes < 2) {
 		*errmsg = ubpf_error("Undefined object type %d.", 0);
 		return false;
 	}
@@ -290,8 +369,16 @@ static bool codepaths_scan (const struct ubpf_vm *vm, const struct ebpf_inst *in
 
 		switch (EBPF_CLASS(inst.opcode)) {
 			case EBPF_CLS_LD:
+				// TODO: there's only LDDW
+				break;
+
 			case EBPF_CLS_LDX:
 				// TODO: check source
+				if (!check_mem_read(vm, &src_datastatus, inst.offset, EBPF_OPSIZE(inst.opcode))) {
+					*errmsg = ubpf_error("Unsafe memory access at PC %d", stack_pc());
+					return false;
+				}
+
 				stack_reg(inst.dst) = reg_stat(kScalar, 0, ~0, 0);
 				break;
 
