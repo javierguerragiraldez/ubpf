@@ -219,7 +219,7 @@ struct object_type {
 // TODO: set these as a vm field
 static struct object_type deftypes[] = {
 	{.size = 10},		// context
-	{.size = STACK_SIZE*sizeof(uint64_t)},	// stack
+	{.size = STACK_SIZE},	// stack
 };
 static const int numdeftypes = (sizeof(deftypes) / sizeof(deftypes[0]));
 
@@ -289,7 +289,7 @@ static bool check_mem_read(
 
 	switch(src_stat->type) {
 		case kStackPtr:
-			valid.lo = -deftypes[1].size;	// type #1: stack
+			valid.lo = -deftypes[src_stat->object_type].size;
 			valid.hi = -wordsize(opsize);
 			break;
 
@@ -344,7 +344,7 @@ static bool codepaths_scan (const struct ubpf_vm *vm, const struct ebpf_inst *in
 	stack_wipe_top();
 	stack_set_pc(0);
 	stack_reg(1) = reg_stat(kObjectPtr, 0, 0, 0);	// R1: context pointer
-	stack_reg(10) = reg_stat(kObjectPtr, 0, 0, 1);	// R10: stack frame pointer (TODO: make it RO)
+	stack_reg(10) = reg_stat(kStackPtr, 0, 0, 1);	// R10: stack frame pointer (TODO: make it RO)
 	if (numdeftypes < 2) {
 		*errmsg = ubpf_error("Undefined object type %d.", 0);
 		return false;
