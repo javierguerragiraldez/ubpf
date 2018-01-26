@@ -217,13 +217,9 @@ struct object_type {
 };
 
 // TODO: set these as a vm field
-enum {
-	kStackSize = 1024,
-};
-
 static struct object_type deftypes[] = {
 	{.size = 10},		// context
-	{.size = kStackSize},	// stack
+	{.size = STACK_SIZE*sizeof(uint64_t)},	// stack
 };
 static const int numdeftypes = (sizeof(deftypes) / sizeof(deftypes[0]));
 
@@ -293,7 +289,7 @@ static bool check_mem_read(
 
 	switch(src_stat->type) {
 		case kStackPtr:
-			valid.lo = -kStackSize;
+			valid.lo = -deftypes[1].size;	// type #1: stack
 			valid.hi = -wordsize(opsize);
 			break;
 
@@ -307,9 +303,8 @@ static bool check_mem_read(
 		default:
 			return false;
 	}
-	valid.lo -= offset;
-	valid.hi -= offset;
-	return within_range(src_stat->range, valid);
+	return src_stat->range.lo + offset >= valid.lo
+		&& src_stat->range.hi + offset <= valid.hi;
 }
 
 

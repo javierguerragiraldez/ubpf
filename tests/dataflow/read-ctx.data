@@ -1,0 +1,13 @@
+-- asm
+ldxw r0, [r1 + 4]
+exit
+
+-- mem
+00 01 02 03 04 05 06 07
+08 09
+
+-- verify
+basic, loops, dead, paths
+
+-- result
+0x7060504
