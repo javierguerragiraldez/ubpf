@@ -35,7 +35,7 @@ struct ubpf_vm {
     ext_func *ext_funcs;
     const char **ext_func_names;
 	struct {
-		int basic:1, dead_code:1, all_paths:1;
+		int basic:1, loopfree:1, dead_code:1, all_paths:1;
 	} check_flags;
 };
 

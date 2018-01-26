@@ -24,6 +24,9 @@ void ubpf_set_checking(struct ubpf_vm *vm, const char *options)
 			case 'b':
 				vm->check_flags.basic = true;
 				break;
+			case 'l':
+				vm->check_flags.loopfree = true;
+				break;
 			case 'd':
 				vm->check_flags.dead_code = true;
 				break;
@@ -109,13 +112,17 @@ static bool linear_checks(const struct ubpf_vm *vm, const struct ebpf_inst *inst
 					case EBPF_OP_EXIT:
 						break;
 
-					case EBPF_OP_JA:
+// 					case EBPF_OP_JA:
 					default:
 						if (inst.offset == -1) {
 							*errmsg = ubpf_error("infinite loop at PC %d", i);
 							return false;
 						}
 						int new_pc = i + 1 + inst.offset;
+						if (inst.offset < 0 && vm->check_flags.loopfree) {
+							*errmsg = ubpf_error("Loop detected between PCs %d and %d", new_pc, i, new_pc);
+							return false;
+						}
 						if (new_pc < 0 || new_pc >= num_insts) {
 							*errmsg = ubpf_error("jump out of bounds at PC %d", i);
 							return false;
@@ -294,7 +301,7 @@ static bool codepaths_scan (const struct ubpf_vm *vm, const struct ebpf_inst *in
 
 			case EBPF_CLS_ALU:
 			case EBPF_CLS_ALU64:
-				// WRONG: assuming dst <= src
+				// FIXME: assuming dst <= src (wrong)
 				stack_reg(inst.dst) = src_datastatus;
 				stack_pc()++;
 				break;

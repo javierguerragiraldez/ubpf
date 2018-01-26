@@ -47,6 +47,7 @@ ubpf_create(void)
     }
 
     vm->check_flags.basic = true;
+	vm->check_flags.loopfree = false;
 	vm->check_flags.dead_code = false;
 	vm->check_flags.all_paths = false;
 
