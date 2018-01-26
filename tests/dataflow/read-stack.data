@@ -1,0 +1,10 @@
+-- asm
+stw [r10 - 4], 0x19
+ldxw r0, [r10 - 4]
+exit
+
+-- verify
+basic, loops, dead, paths
+
+-- result
+0x19

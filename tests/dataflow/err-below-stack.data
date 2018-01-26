@@ -1,0 +1,9 @@
+-- asm
+ldxw r0, [r10-129]
+exit
+
+-- verify
+basic, loops, dead, paths
+
+-- error
+Failed to load code: Unsafe memory access at PC 0
